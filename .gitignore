@@ -1,0 +1,5 @@
+.env
+/bot
+bin/
+.idea/
+.DS_Store

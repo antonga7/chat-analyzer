@@ -1,0 +1,22 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - errcheck      # Проверка необработанных ошибок
+    - govet         # Стандартный анализатор Go
+    - ineffassign   # Неиспользуемые присваивания
+    - staticcheck   # Глубокий статический анализ
+    - unused        # Неиспользуемый код
+    - errorlint     # Правильная работа с обертками ошибок (%w)
+    - revive        # Чистота и стиль Go-кода
+    - gocritic      # Рекомендации по улучшению идиоматичности
+    - misspell      # Поиск опечаток в словах
+
+  exclusions:
+    rules:
+      - linters:
+          - revive
+        text: "exported:|package-comments:"
