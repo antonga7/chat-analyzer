@@ -163,15 +163,16 @@ func ParseHTML(r io.Reader, chatID int64) ([]storage.Message, error) {
 				// КЛАССИФИКАЦИЯ (msgType)
 				var msgType string
 
-				if findNodeByClass(n, "forwarded body") != nil {
+				switch {
+				case findNodeByClass(n, "forwarded body") != nil:
 					msgType = storage.TypeForward
-				} else if findNodeByClass(n, "media_photo") != nil {
+				case findNodeByClass(n, "media_photo") != nil || findNodeByClass(n, "photo_wrap") != nil:
 					msgType = storage.TypePhoto
-				} else if findNodeByClass(n, "media_voice_message") != nil {
+				case findNodeByClass(n, "media_voice_message") != nil || findNodeByClass(n, "media_video") != nil:
 					msgType = storage.TypeMedia
-				} else if findNodeByClass(n, "media_file") != nil {
+				case findNodeByClass(n, "media_file") != nil:
 					msgType = storage.TypeDocument
-				} else if content != "" {
+				case content != "":
 					msgType = storage.TypeText
 				}
 

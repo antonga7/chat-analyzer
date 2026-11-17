@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -126,7 +127,7 @@ func (s *Storage) GetTopUsers(ctx context.Context, chatID int64, limit int) ([]U
 
 	for rows.Next() {
 		var stat UserStat
-		if err := rows.Scan(&stat.Username, &stat.TotalCount,&stat.TextCount, &stat.ForwardCount, &stat.MediaCount); err != nil {
+		if err := rows.Scan(&stat.Username, &stat.TotalCount, &stat.TextCount, &stat.ForwardCount, &stat.MediaCount); err != nil {
 			return nil, fmt.Errorf("unable to get top users: %w", err)
 		}
 		stats = append(stats, stat)
@@ -216,4 +217,24 @@ func (s *Storage) GetChatStats(ctx context.Context, chatID int64) (ChatStat, err
 	}
 
 	return st, nil
+}
+
+func (s *Storage) SaveMessagesBatch(ctx context.Context, msgs []Message) error {
+	rows := make([][]any, 0, len(msgs))
+	for _, msg := range msgs {
+		row := []any{msg.ChatID, msg.UserID, msg.Username, msg.MsgType, msg.Text, msg.CreatedAt}
+		rows = append(rows, row)
+	}
+
+	_, err := s.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"messages"},
+		[]string{"chat_id", "user_id", "username", "msg_type", "text", "created_at"}, // Названия колонок (строго в том же порядке как и в row)
+		pgx.CopyFromRows(rows), // Превращаем нашу матрицу [][]any в формат, который принимает драйвер
+		)
+	if err != nil {
+		return fmt.Errorf("unable to copy messages: %w", err)
+	}
+
+	return nil
 }

@@ -1,10 +1,12 @@
 package bot
 
 import (
+	"chat-analyzer/internal/importer"
 	"chat-analyzer/internal/storage"
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -103,9 +105,13 @@ func classifyMessage(msg *tgbotapi.Message) (msgType string, content string, ok 
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Если прислали .json файл – перехватываем его для импорта истории чата (не сохраняя сам файл в статистику)
-	if msg.Document != nil && strings.HasSuffix(strings.ToLower(msg.Document.FileName), ".json") {
-		b.handleJSONImport(ctx, msg)
-		return
+	if msg.Document != nil {
+		filename := strings.ToLower(msg.Document.FileName)
+		if strings.HasSuffix(filename, ".json") || strings.HasSuffix(filename, ".html") {
+			b.handleFileImport(ctx, msg)
+			return
+		}
+
 	}
 
 	// Если это команда бота(/top, /me, /stats) - выполняем команду и не засоряем статистику
@@ -277,10 +283,86 @@ func (b *Bot) handleStatsCommand(ctx context.Context, msg *tgbotapi.Message) {
 
 }
 
-func (b *Bot) handleJSONImport(ctx context.Context, msg *tgbotapi.Message) {
-	_ = ctx
-	reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("📂 Получен файл истории %s! В следующем шаге подключим сюда скоростной парсер.", msg.Document.FileName))
-	if _, err := b.api.Send(reply); err != nil {
-		log.Printf("send json import reply: %v", err)
+func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
+	filename := strings.ToLower(msg.Document.FileName)
+
+	// 1. Отправляем сообщение - статус
+	statusMsg := tgbotapi.NewMessage(msg.Chat.ID, "⏳ Начинаю скачивание файла от серверов Telegram...")
+	sentStatus, _ := b.api.Send(statusMsg)
+
+	// 2. Запрашиваем у Telegram прямую ссылка на скачивание файла по его FileId
+	fileURL, err := b.api.GetFileDirectURL(msg.Document.FileID)
+	if err != nil {
+		if _, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка получения ссылки на файл.")); err != nil {
+			log.Printf("get file direct url: %v", err)
+		}
+		return
 	}
+
+	// 3. Скачиваем файл в оперативную память
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		if _, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка скачивания файла.")); err != nil {
+			log.Printf("send error: %v", err)
+		}
+
+		return
+	}
+
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("error closing body: %v", err)
+		}
+	}()
+
+	// Обновляем статус
+	edit := tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "⏳ Файл скачан. Идет парсинг сообщений...")
+	if _, err := b.api.Send(edit); err != nil {
+		log.Printf("send error: %v", err)
+	}
+
+	var msgs []storage.Message
+	var parseErr error
+
+	if strings.HasSuffix(filename, ".json") {
+		msgs, parseErr = importer.ParseJSON(resp.Body, msg.Chat.ID)
+	}
+	if strings.HasSuffix(filename, ".html") {
+		msgs, parseErr = importer.ParseHTML(resp.Body, msg.Chat.ID)
+	}
+
+	// Обработка ошибок парсинга
+	if parseErr != nil {
+		errText := fmt.Sprintf("❌ Ошибка при чтении файла экспорта: %v", parseErr)
+		if _, err := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, errText)); err != nil {
+			log.Printf("send error: %v", err)
+		}
+		return
+	}
+	if len(msgs) == 0 {
+		if _, err := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "В файле не найдено сообщений.")); err != nil {
+			log.Printf("send error: %v", err)
+		}
+		return
+	}
+
+	// Обновляем стату
+	edit = tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, fmt.Sprintf("⏳ Найдено %d сообщений. Сохраняю в базу данных (это займет пару секунд)...", len(msgs)))
+	if _, err := b.api.Send(edit); err != nil {
+		log.Printf("send error: %v", err)
+	}
+
+	if err = b.storage.SaveMessagesBatch(ctx, msgs); err != nil {
+		edit = tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, fmt.Sprintf("❌ Ошибка сохранения в БД: %v", err))
+		if _, err := b.api.Send(edit); err != nil {
+			log.Printf("send error: %v", err)
+		}
+		return
+	}
+
+	successText := fmt.Sprintf("✅ Готово! Успешно загружено %d сообщений в базу.\nТеперь можно использовать команду /top или /stats", len(msgs))
+	if _, err := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, successText)); err != nil {
+		log.Printf("send error: %v", err)
+	}
+
 }
