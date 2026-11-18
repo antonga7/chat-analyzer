@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chat-analyzer/internal/ai"
 	"chat-analyzer/internal/bot"
 	"chat-analyzer/internal/storage"
 	"context"
@@ -35,6 +36,11 @@ func run() error {
 		return errors.New("TG_BOT_TOKEN env variable not set")
 	}
 
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	if geminiKey == "" {
+		return errors.New("GEMINI_API_KEY env variable not set")
+	}
+
 	// Создаем контекст, который сам отменится при нажатии Ctrl+C (SIGINT) или остановке контейнера (SIGTERM)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -57,8 +63,14 @@ func run() error {
 	}
 	log.Println("Database schema initialized!")
 
+	// 1. Сначала подключаем Gemini
+	aiClient, err := ai.New(ctx, geminiKey)
+	if err != nil {
+		return fmt.Errorf("failed to create aiClient: %w", err)
+	}
+
 	// Инициализируем Telegram-бота
-	tgBot, err := bot.New(botToken, db)
+	tgBot, err := bot.New(botToken, db, aiClient)
 	if err != nil {
 		return fmt.Errorf("failed to create bot: %w", err)
 	}
@@ -68,4 +80,5 @@ func run() error {
 	log.Println("Bot stopped gracefully.")
 
 	return nil
+
 }

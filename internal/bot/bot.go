@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"chat-analyzer/internal/ai"
 	"chat-analyzer/internal/importer"
 	"chat-analyzer/internal/storage"
 	"context"
@@ -8,35 +9,64 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+type summaryTask struct {
+	chatID      int64
+	statusMsgID int
+	messages    []storage.Message
+}
+
 // Bot объединяет клиент Телеграма и нашу базу данных
 type Bot struct {
-	api     *tgbotapi.BotAPI
-	storage *storage.Storage
+	api          *tgbotapi.BotAPI
+	storage      *storage.Storage
+	ai           *ai.Client
+	summaryQueue chan summaryTask
 }
 
 // New создает и проверяет подключение к Telegram API
-func New(token string, s *storage.Storage) (*Bot, error) {
+func New(token string, s *storage.Storage, aiClient *ai.Client) (*Bot, error) {
 	// Стучимся в Telegram с нашим токеном(под капотом вызывается метод getMe)
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("new api: %w", err)
 	}
 
+	// Создаем конфиг со списком команд
+	commands := tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{Command: "summary", Description: "ИИ-выжимка чата"},
+		tgbotapi.BotCommand{Command: "top", Description: "Топ-5 активных участников"},
+		tgbotapi.BotCommand{Command: "stats", Description: "Общая статистика чата"},
+		tgbotapi.BotCommand{Command: "me", Description: "Моя личная статистика"},
+		tgbotapi.BotCommand{Command: "import", Description: "Инструкция по загрузке истории"},
+		tgbotapi.BotCommand{Command: "help", Description: "Список команд"},
+	)
+
+	if _, err := api.Request(commands); err != nil {
+		log.Printf("failed to set commands: %v", err)
+	}
+
+	// Отправляем запрос в Telegram. Используем api.Request(), так как в ответ
+	// нам не нужно сообщение (Message), нам нужен только статус успеха (APIResponse)
 	log.Printf("Authorized on account %s", api.Self.UserName)
 
 	return &Bot{
-		api:     api,
-		storage: s,
+		api:          api,
+		storage:      s,
+		ai:           aiClient,
+		summaryQueue: make(chan summaryTask, 100),
 	}, nil
 
 }
 
 // Start запускает бесконечный цикл чтения сообщений (Long Polling)
 func (b *Bot) Start(ctx context.Context) {
+	// Запускаем фонового рабочего, который будет разгребать очередь ИИ
+	go b.summaryWorker(ctx)
 	// Настраиваем Long Polling: 0 — читать с первого непрочитанного, тайм-аут ожидания — 60 сек
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -62,7 +92,9 @@ func (b *Bot) Start(ctx context.Context) {
 				continue
 			}
 
-			b.handleMessage(ctx, update.Message)
+			// Запускаем обработку каждого сообщения в отдельной легковесной горутине.
+			// Цикл for мгновенно переходит к следующей итерации и ждет новый update.
+			go b.handleMessage(ctx, update.Message)
 
 		}
 	}
@@ -114,12 +146,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	}
 
-	// Если это команда бота(/top, /me, /stats) - выполняем команду и не засоряем статистику
+	// Если это команда бота(/top, /me, /stats, /help, /summary, /start) - выполняем команду и не засоряем статистику
 
 	if msg.IsCommand() {
 		switch msg.Command() {
 		case "start", "help":
-			helpText := "👋 Привет! Я бот-анализатор чата.\n\nДоступные команды:\n/top — топ-5 активных участников\n/me — твоя личная статистика\n/stats — общая сводка по чату\n/help — список команд\n/import — как загрузить старую историю чата"
+			helpText := "👋 Привет! Я бот-анализатор чата.\n\nДоступные команды:\n/top — топ-5 активных участников\n/me — твоя личная статистика\n/stats — общая сводка по чату\n/help — список команд\n/import — как загрузить старую историю чата\n/summary — ИИ-выжимка чата"
 			reply := tgbotapi.NewMessage(msg.Chat.ID, helpText)
 			if _, err := b.api.Send(reply); err != nil {
 				log.Printf("sending message: %v", err)
@@ -141,6 +173,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			b.handleMeCommand(ctx, msg)
 		case "stats":
 			b.handleStatsCommand(ctx, msg)
+		case "summary":
+			b.handleSummaryCommand(ctx, msg)
 		}
 		return
 	}
@@ -188,7 +222,7 @@ func (b *Bot) handleTopCommand(ctx context.Context, msg *tgbotapi.Message) {
 	var sb strings.Builder
 	sb.WriteString("📊 Топ-5 активных участников чата:\n\n")
 	for i, stat := range stats {
-		fmt.Fprintf(&sb, "%d. %s — %d сообщ. (✍️ %d | 🔄 %d | 🖼 %d)\n",
+		_, _ =fmt.Fprintf(&sb, "%d. %s — %d сообщ. (✍️ %d | 🔄 %d | 🖼 %d)\n",
 			i+1, stat.Username, stat.TotalCount, stat.TextCount, stat.ForwardCount, stat.MediaCount)
 	}
 	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
@@ -300,12 +334,20 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	// 3. Скачиваем файл в оперативную память
-	resp, err := http.Get(fileURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
-		if _, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка скачивания файла.")); err != nil {
-			log.Printf("send error: %v", err)
+		if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка скачивания файла.")); sendErr != nil {
+			log.Printf("send error: %v", sendErr)
 		}
+		return
+	}
 
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка скачивания файла (таймаут или обрыв сети).")); sendErr != nil {
+			log.Printf("send error: %v", sendErr)
+		}
 		return
 	}
 
@@ -365,4 +407,93 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 		log.Printf("send error: %v", err)
 	}
 
+}
+
+func (b *Bot) handleSummaryCommand(ctx context.Context, msg *tgbotapi.Message) {
+	// 1. Сначала проверяем базу (быстрая операция, очередь не нужна)
+	msgs, err := b.storage.GetRecentMessages(ctx, msg.Chat.ID, 200)
+	if err != nil {
+		log.Printf("get recent messages: %v", err)
+		if _, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка получения сообщений из БД")); err != nil {
+			log.Printf("send message: %v", err)
+		}
+		return
+	}
+
+	if len(msgs) == 0 {
+		if _, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Пока нет текстовых сообщений для анализа")); err != nil {
+			return
+		}
+	}
+
+	// 2. Считаем, сколько задач уже ждут в канале, и отправляем сообщение-статус
+	pos := len(b.summaryQueue) + 1
+	waitText := fmt.Sprintf("⏳Запрос принят (позиция в очереди: %d)...", pos)
+	sentMsg, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, waitText))
+	if err != nil {
+		log.Printf("send wait message: %v", err)
+		return
+	}
+	
+	// 3. Упаковываем задачу и кладем в канал
+	task := summaryTask{
+		chatID: msg.Chat.ID,
+		statusMsgID: sentMsg.MessageID,
+		messages:    msgs,
+	}
+
+	select {
+	case b.summaryQueue <- task:
+		// Задача легла в буфер канала! Выходим из функции, дальше работает summaryWorker
+	default:
+		// Если в канале уже висит 100 задач и места нет
+		edit := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, "❌ Очередь переполнена, попробуйте позже")
+		if _, err := b.api.Send(edit); err != nil {
+			log.Printf("send error: %v", err)
+		}
+	}
+
+}
+
+func (b *Bot) summaryWorker(ctx context.Context) {
+	ticker := time.NewTicker(4 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task := <-b.summaryQueue:
+			// 1. Обновляем статус в чате: задача взята в работу
+			editStatus := tgbotapi.NewEditMessageText(task.chatID, task.statusMsgID, "🧠 Генерирую выжимку...")
+			if _, err := b.api.Send(editStatus); err != nil {
+				log.Printf("worker status edit err: %v", err)
+			}
+
+			// 2. Идем в Gemini API
+			summary, err := b.ai.SummarizeChat(ctx, task.messages)
+			if err != nil {
+				log.Printf("summary err: %v", err)
+				errText := fmt.Sprintf("❌ Ошибка генерации саммари: %v", err)
+				editErr := tgbotapi.NewEditMessageText(task.chatID, task.statusMsgID, errText)
+				if _, sendErr := b.api.Send(editErr); sendErr != nil {
+					log.Printf("send error: %v", err)
+				}
+			} else {
+				// 3. Если ошибок нет — отправляем готовую выжимку
+				editSuccess := tgbotapi.NewEditMessageText(task.chatID, task.statusMsgID, "📝 Выжимка чата:\n\n"+summary)
+				if _, sendErr := b.api.Send(editSuccess); sendErr != nil {
+					log.Printf("send summary error: %v", sendErr)
+				}
+			}
+
+			// 4. Ждем 4 секунды перед тем, как взять СЛЕДУЮЩУЮ задачу из очереди
+			select {
+			case <-ticker.C:
+				// Пауза выдержана, идем на новый виток цикла for
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }

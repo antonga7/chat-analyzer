@@ -231,10 +231,45 @@ func (s *Storage) SaveMessagesBatch(ctx context.Context, msgs []Message) error {
 		pgx.Identifier{"messages"},
 		[]string{"chat_id", "user_id", "username", "msg_type", "text", "created_at"}, // Названия колонок (строго в том же порядке как и в row)
 		pgx.CopyFromRows(rows), // Превращаем нашу матрицу [][]any в формат, который принимает драйвер
-		)
+	)
 	if err != nil {
 		return fmt.Errorf("unable to copy messages: %w", err)
 	}
 
 	return nil
+}
+
+func (s *Storage) GetRecentMessages(ctx context.Context, chatID int64, limit int) ([]Message, error) {
+	query := `
+	SELECT username, text, created_at
+	FROM (
+	  		SELECT username, text, created_at
+	  		FROM messages
+	  		where chat_id = $1 AND msg_type = 'text' AND text != ''
+			ORDER BY created_at DESC
+			LIMIT $2
+	) sub
+	ORDER BY created_at ASC;`
+
+	rows, err := s.pool.Query(ctx, query, chatID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get recent messages: %w", err)
+	}
+	defer rows.Close()
+
+	msgs := make([]Message, 0, limit)
+	for rows.Next() {
+		var m Message
+		err := rows.Scan(&m.Username, &m.Text, &m.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("unable to get recent messages: %w", err)
+		}
+		msgs = append(msgs, m)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("unable to get recent messages: %w", err)
+	}
+
+	return msgs, nil
 }
