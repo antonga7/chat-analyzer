@@ -160,7 +160,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 				"/help — список команд\n" +
 				"/import — как загрузить старую историю чата\n" +
 				"/summary — ИИ-выжимка чата\n" +
-				"/fun_story - Забавная байка по последним сообщениям"
+				"/fun_story — Забавная байка по последним сообщениям"
 
 			reply := tgbotapi.NewMessage(msg.Chat.ID, helpText)
 			if _, err := b.api.Send(reply); err != nil {
@@ -496,10 +496,15 @@ func (b *Bot) summaryWorker(ctx context.Context) {
 			summary, err := b.ai.SummarizeChat(ctx, task.messages, task.style)
 			if err != nil {
 				log.Printf("summary err: %v", err)
-				errText := fmt.Sprintf("❌ Ошибка генерации саммари: %v", err)
+				var errText string
+				if strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "UNAVAILABLE") {
+					errText = "⚠️ Серверы ИИ сейчас перегружены. Попробуй повторить запрос через минуту."
+				} else {
+					errText = "❌ Ошибка генерации саммари. Попробуй чуть позже."
+				}
 				editErr := tgbotapi.NewEditMessageText(task.chatID, task.statusMsgID, errText)
 				if _, sendErr := b.api.Send(editErr); sendErr != nil {
-					log.Printf("send error: %v", err)
+					log.Printf("send error: %v", sendErr)
 				}
 			} else {
 				// 3. Если ошибок нет — отправляем готовую выжимку

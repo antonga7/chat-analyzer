@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -15,6 +16,7 @@ type SummaryStyle string
 const (
 	StyleOfficial SummaryStyle = "official"
 	StyleFunStory SummaryStyle = "fun_story"
+	maxRetries                 = 3
 )
 
 type Client struct {
@@ -68,23 +70,55 @@ func (c *Client) SummarizeChat(ctx context.Context, msgs []storage.Message, styl
 	// Отправляем собранный текст (sb.String()) в модель.
 	// genai.Text(...) оборачивает нашу обычную строку в формат контента, который понимает Gemini.
 	// Последний аргумент nil — это доп. настройки (температура, лимит токенов), оставляем по умолчанию.
-	resp, err := c.genaiClient.Models.GenerateContent(
-		ctx,
-		c.model,
-		genai.Text(sb.String()),
-		nil,
-	)
-	if err != nil {
-		return "", fmt.Errorf("generate content: %w", err)
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := c.genaiClient.Models.GenerateContent(
+			ctx,
+			c.model,
+			genai.Text(sb.String()),
+			nil,
+		)
+		if err == nil {
+			if resp.UsageMetadata != nil {
+				log.Printf("Tokens used: prompt=%d, response=%d, total=%d",
+					resp.UsageMetadata.PromptTokenCount,
+					resp.UsageMetadata.CandidatesTokenCount,
+					resp.UsageMetadata.TotalTokenCount)
+			}
+			// Метод resp.Text() достает готовый текстовый ответ ИИ из структуры ответа
+			return resp.Text(), nil
+		}
+
+		lastErr = err
+		if !isRetryable(lastErr) {
+			return "", fmt.Errorf("generate content: %w", err)
+		}
+
+		if attempt == maxRetries {
+			break
+		}
+
+		log.Printf("Gemini temporary error (attempt %d/%d): %v. Retrying...", attempt, maxRetries, err)
+
+		delay := time.Duration(attempt*2) * time.Second
+
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 
-	if resp.UsageMetadata != nil {
-		log.Printf("Tokens used: prompt=%d, response=%d, total=%d",
-			resp.UsageMetadata.PromptTokenCount,
-			resp.UsageMetadata.CandidatesTokenCount,
-			resp.UsageMetadata.TotalTokenCount)
-	}
+	return "", fmt.Errorf("generate content after %d attempts: %w", maxRetries, lastErr)
 
-	// Метод resp.Text() достает готовый текстовый ответ ИИ из структуры ответа
-	return resp.Text(), nil
+}
+
+
+
+func isRetryable(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "503") ||
+		strings.Contains(msg, "UNAVAILABLE") ||
+		strings.Contains(msg, "429")
 }
