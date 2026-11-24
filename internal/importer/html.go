@@ -74,7 +74,7 @@ func parseExportDate(raw string) (time.Time, bool) {
 }
 
 // 3. hashUsername генерирует стабильный числовой ID из имени, если у юзера нет аватарки author_XXX.jpg
-func hashUsername (name string) int64 {
+func hashUsername(name string) int64 {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(name))
 	return int64(-h.Sum32())
@@ -118,6 +118,15 @@ func ParseHTML(r io.Reader, chatID int64) ([]storage.Message, error) {
 				author := lastAuthor
 				authorID := lastAuthorID
 
+				// ID сообщений
+				var msgID int64
+				if rawID := getAttr(n, "id"); rawID != ""{
+					if parsedID, err := strconv.ParseInt(strings.TrimPrefix(rawID, "message"), 10, 64); err == nil {
+						msgID = parsedID
+					}
+				}
+
+
 				// Если сообщение НЕ joined, значит автор сменился — достаем нового
 				if !strings.Contains(class, "joined") {
 					nameNode := findNodeByClass(n, "from_name")
@@ -146,7 +155,7 @@ func ParseHTML(r io.Reader, chatID int64) ([]storage.Message, error) {
 				var createdAt time.Time
 				dateNode := findNodeByClass(n, "date details")
 				if dateNode != nil {
-					rawDate := getAttr(dateNode, "title") // "3 ноября 2026, 00:36:15"
+					rawDate := getAttr(dateNode, "title")  // "3 ноября 2026, 00:36:15"
 					parsed, ok := parseExportDate(rawDate) // Используем нашу функцию с bool!
 					if ok {
 						createdAt = parsed
@@ -188,12 +197,13 @@ func ParseHTML(r io.Reader, chatID int64) ([]storage.Message, error) {
 
 				// Собираем структуру storage.Message и сделай result = append(result, msg)
 				result = append(result, storage.Message{
-					ChatID: chatID,
-					UserID: authorID,
-					Username: author,
-					Text: content,
-					MsgType: msgType,
-					CreatedAt: createdAt,
+					ChatID:      chatID,
+					UserID:      authorID,
+					Username:    author,
+					Text:        content,
+					MsgType:     msgType,
+					CreatedAt:   createdAt,
+					TgMessageID: msgID,
 				})
 			}
 		}

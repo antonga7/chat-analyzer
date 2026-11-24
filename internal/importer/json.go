@@ -21,6 +21,7 @@ type telegramMessage struct {
 	DateUnix      string          `json:"date_unixtime"`  // Например:"1794305112"
 	From          string          `json:"from"`           // Имя автора ("Anton")
 	FromID        string          `json:"from_id"`        // Строка вида "user254819201"
+	ID            int64           `json:"id"`             // ID сообщения
 	ForwardedFrom string          `json:"forwarded_from"` // Заполнено, если это репост
 	Photo         string          `json:"photo"`          // Заполнено, если есть фото
 	File          string          `json:"file"`           // Заполнено, если прикреплен файл/медиа
@@ -125,6 +126,7 @@ func ParseJSON(r io.Reader, chatID int64) ([]storage.Message, error) {
 			Text:      content,
 			MsgType:   msgType,
 			CreatedAt: createdAt,
+			TgMessageID: msg.ID,
 		})
 
 	}

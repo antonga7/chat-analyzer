@@ -42,13 +42,14 @@ func (s *Storage) Close() {
 }
 
 type Message struct {
-	ID        int64
-	ChatID    int64
-	UserID    int64
-	Username  string
-	Text      string
-	MsgType   string
-	CreatedAt time.Time
+	ID          int64
+	ChatID      int64
+	UserID      int64
+	Username    string
+	Text        string
+	MsgType     string
+	CreatedAt   time.Time
+	TgMessageID int64
 }
 
 func (s *Storage) InitSchema(ctx context.Context) error {
@@ -62,8 +63,9 @@ func (s *Storage) InitSchema(ctx context.Context) error {
     	msg_type TEXT NOT NULL DEFAULT 'text',
     	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
-	ALTER TABLE messages ADD COLUMN IF NOT EXISTS msg_type TEXT NOT NULL DEFAULT 'text';
+	ALTER TABLE messages ADD COLUMN IF NOT EXISTS tg_message_id BIGINT;
 	CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_tg_id ON messages (chat_id, tg_message_id);
 	`
 
 	_, err := s.pool.Exec(ctx, query)
@@ -83,10 +85,11 @@ func (s *Storage) SaveMessage(ctx context.Context, msg Message) error {
 		msg.MsgType = TypeText
 	}
 	query := `
-	INSERT INTO messages (chat_id, user_id, username, text, msg_type, created_at)
-	VALUES ($1, $2, $3, $4, $5, $6);`
+	INSERT INTO messages (chat_id, user_id, username, text, msg_type, created_at, tg_message_id)
+	VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, 0))
+	ON CONFLICT(chat_id, tg_message_id) DO NOTHING;;`
 
-	_, err := s.pool.Exec(ctx, query, msg.ChatID, msg.UserID, msg.Username, msg.Text, msg.MsgType, msg.CreatedAt)
+	_, err := s.pool.Exec(ctx, query, msg.ChatID, msg.UserID, msg.Username, msg.Text, msg.MsgType, msg.CreatedAt, msg.TgMessageID)
 	if err != nil {
 		return fmt.Errorf("unable to save message: %w", err)
 
@@ -219,24 +222,51 @@ func (s *Storage) GetChatStats(ctx context.Context, chatID int64) (ChatStat, err
 	return st, nil
 }
 
-func (s *Storage) SaveMessagesBatch(ctx context.Context, msgs []Message) error {
+func (s *Storage) SaveMessagesBatch(ctx context.Context, msgs []Message) (int64, error) {
 	rows := make([][]any, 0, len(msgs))
 	for _, msg := range msgs {
-		row := []any{msg.ChatID, msg.UserID, msg.Username, msg.MsgType, msg.Text, msg.CreatedAt}
+		row := []any{msg.ChatID, msg.UserID, msg.Username, msg.MsgType, msg.Text, msg.CreatedAt, msg.TgMessageID}
 		rows = append(rows, row)
 	}
 
-	_, err := s.pool.CopyFrom(
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("unable to start transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx, `CREATE TEMP TABLE tmp_messages (LIKE messages INCLUDING DEFAULTS) ON COMMIT DROP;`)
+	if err != nil {
+		return 0, fmt.Errorf("unable to create temp messages: %w", err)
+	}
+
+	_, err = tx.CopyFrom(
 		ctx,
-		pgx.Identifier{"messages"},
-		[]string{"chat_id", "user_id", "username", "msg_type", "text", "created_at"}, // Названия колонок (строго в том же порядке как и в row)
+		pgx.Identifier{"tmp_messages"},
+		[]string{"chat_id", "user_id", "username", "msg_type", "text", "created_at", "tg_message_id"}, // Названия колонок (строго в том же порядке как и в row)
 		pgx.CopyFromRows(rows), // Превращаем нашу матрицу [][]any в формат, который принимает драйвер
 	)
 	if err != nil {
-		return fmt.Errorf("unable to copy messages: %w", err)
+		return 0, fmt.Errorf("unable to copy messages: %w", err)
 	}
 
-	return nil
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO messages (chat_id, tg_message_id, user_id, username, msg_type, text, created_at)
+			SELECT chat_id, NULLIF(tg_message_id, 0), user_id, username, msg_type, text, created_at
+			FROM tmp_messages
+			ON CONFLICT (chat_id, tg_message_id) DO NOTHING;`,
+	)
+
+	if err != nil {
+		return 0, fmt.Errorf("unable to insert messages: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit tx: %w", err)
+	}
+
+	return tag.RowsAffected(), nil
+
 }
 
 func (s *Storage) GetRecentMessages(ctx context.Context, chatID int64, limit int) ([]Message, error) {

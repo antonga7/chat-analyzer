@@ -23,3 +23,9 @@ db-up:
 # Остановить базу данных
 db-down:
 	docker compose down
+
+ssh:
+	ssh bot-server
+
+deploy:
+	ssh bot-server "cd ~/chat-analyzer && git pull && docker compose up -d --build"
