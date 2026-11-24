@@ -1,4 +1,4 @@
-.PHONY: run build lint test db-up db-down
+.PHONY: run build lint test db-up db-down ssh deploy
 
 # Запуск бота локально
 run:
