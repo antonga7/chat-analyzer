@@ -87,7 +87,7 @@ func (s *Storage) SaveMessage(ctx context.Context, msg Message) error {
 	query := `
 	INSERT INTO messages (chat_id, user_id, username, text, msg_type, created_at, tg_message_id)
 	VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, 0))
-	ON CONFLICT(chat_id, tg_message_id) DO NOTHING;;`
+	ON CONFLICT(chat_id, tg_message_id) DO NOTHING;`
 
 	_, err := s.pool.Exec(ctx, query, msg.ChatID, msg.UserID, msg.Username, msg.Text, msg.MsgType, msg.CreatedAt, msg.TgMessageID)
 	if err != nil {

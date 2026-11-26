@@ -120,12 +120,11 @@ func ParseHTML(r io.Reader, chatID int64) ([]storage.Message, error) {
 
 				// ID сообщений
 				var msgID int64
-				if rawID := getAttr(n, "id"); rawID != ""{
+				if rawID := getAttr(n, "id"); rawID != "" {
 					if parsedID, err := strconv.ParseInt(strings.TrimPrefix(rawID, "message"), 10, 64); err == nil {
 						msgID = parsedID
 					}
 				}
-
 
 				// Если сообщение НЕ joined, значит автор сменился — достаем нового
 				if !strings.Contains(class, "joined") {

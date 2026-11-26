@@ -3,13 +3,17 @@ package ai
 import (
 	"chat-analyzer/internal/storage"
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
 	"google.golang.org/genai"
 )
+
+var ErrOverloaded = errors.New("ai service overloaded")
 
 type SummaryStyle string
 
@@ -110,15 +114,14 @@ func (c *Client) SummarizeChat(ctx context.Context, msgs []storage.Message, styl
 		}
 	}
 
-	return "", fmt.Errorf("generate content after %d attempts: %w", maxRetries, lastErr)
+	return "", fmt.Errorf("%w after %d attempts: %w", ErrOverloaded, maxRetries, lastErr)
 
 }
 
-
-
 func isRetryable(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "503") ||
-		strings.Contains(msg, "UNAVAILABLE") ||
-		strings.Contains(msg, "429")
+	if apiErr, ok := errors.AsType[genai.APIError](err); ok {
+		return apiErr.Code == http.StatusServiceUnavailable || // 503
+			apiErr.Code == http.StatusTooManyRequests // 429
+	}
+	return false
 }

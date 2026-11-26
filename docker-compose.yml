@@ -3,15 +3,15 @@ services:
     image: postgres:16-alpine
     container_name: chat_analyzer_db
     environment:
-      POSTGRES_USER: bot_user
-      POSTGRES_PASSWORD: bot_password
-      POSTGRES_DB: chat_analyzer
+      POSTGRES_USER: ${POSTGRES_USER:-bot_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bot_password}
+      POSTGRES_DB: ${POSTGRES_DB:-chat_analyzer}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bot_user -d chat_analyzer"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bot_user} -d ${POSTGRES_DB:-chat_analyzer}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -26,7 +26,7 @@ services:
     env_file:
       - .env
     environment:
-      DB_DSN: postgres://bot_user:bot_password@postgres:5432/chat_analyzer
+      DB_DSN: postgres://${POSTGRES_USER:-bot_user}:${POSTGRES_PASSWORD:-bot_password}@postgres:5432/${POSTGRES_DB:-chat_analyzer}
 
 volumes:
   pgdata:

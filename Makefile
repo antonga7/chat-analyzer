@@ -14,7 +14,7 @@ lint:
 
 # Запуск всех тестов
 test:
-	go test -v ./...
+	go test -v -race -cover ./...
 
 # Поднять базу данных в фоне
 db-up:

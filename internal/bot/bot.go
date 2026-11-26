@@ -5,10 +5,12 @@ import (
 	"chat-analyzer/internal/importer"
 	"chat-analyzer/internal/storage"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -67,8 +69,14 @@ func New(token string, s *storage.Storage, aiClient *ai.Client) (*Bot, error) {
 
 // Start запускает бесконечный цикл чтения сообщений (Long Polling)
 func (b *Bot) Start(ctx context.Context) {
-	// Запускаем фонового рабочего, который будет разгребать очередь ИИ
-	go b.summaryWorker(ctx)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		b.summaryWorker(ctx) // Запускаем фонового рабочего, который будет разгребать очередь ИИ
+	}()
+
 	// Настраиваем Long Polling: 0 — читать с первого непрочитанного, тайм-аут ожидания — 60 сек
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -82,10 +90,12 @@ func (b *Bot) Start(ctx context.Context) {
 		case <-ctx.Done():
 			log.Println("Stopping Telegram Bot, waiting for updates to finish...")
 			b.api.StopReceivingUpdates()
+			wg.Wait() // Ждём завершения summaryWorker и всех запущенных handleMessage
 			return
 		// Сценарий 2: Пришло новое событие из Telegram
 		case update, ok := <-updates:
 			if !ok {
+				wg.Wait()
 				return // Канал закрылся
 			}
 
@@ -94,10 +104,13 @@ func (b *Bot) Start(ctx context.Context) {
 				continue
 			}
 
-			// Запускаем обработку каждого сообщения в отдельной легковесной горутине.
-			// Цикл for мгновенно переходит к следующей итерации и ждет новый update.
-			go b.handleMessage(ctx, update.Message)
-
+			wg.Add(1)
+			go func(m *tgbotapi.Message) {
+				defer wg.Done()
+				// Запускаем обработку каждого сообщения в отдельной легковесной горутине.
+				// Цикл for мгновенно переходит к следующей итерации и ждет новый update.
+				b.handleMessage(ctx, m)
+			}(update.Message)
 		}
 	}
 }
@@ -168,11 +181,11 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			}
 		case "import":
 			importText := "📥 Как загрузить старую историю чата:\n\n" +
-				"1. Открой этот чат в Telegram Desktop на компьютере.\n" +
+				"1. Открой этот чат в Telegram Desktop или Telegram на macOS.\n" +
 				"2. Нажми «⋮» (три точки в правом верхнем углу) -> Экспорт истории чата.\n" +
 				"3. Сними ВСЕ галочки с фото/видео/файлов.\n" +
-				"4. В самом низу выбери Формат: «Машиночитаемый JSON».\n" +
-				"5. Отправь полученный файл result.json прямо сюда в чат!"
+				"4. Выбери формат: «Машиночитаемый JSON» (result.json) или HTML (messages.html).\n" +
+				"5. Отправь полученный файл прямо сюда в чат!"
 			reply := tgbotapi.NewMessage(msg.Chat.ID, importText)
 			if _, err := b.api.Send(reply); err != nil {
 				log.Printf("sending import help: %v", err)
@@ -370,6 +383,15 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("download file unexpected status: %s", resp.Status)
+		edit := tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "❌ Не удалось скачать файл (ошибка сервера Telegram).")
+		if _, sendErr := b.api.Send(edit); sendErr != nil {
+			log.Printf("send error: %v", sendErr)
+		}
+		return
+	}
+
 	// Обновляем статус
 	edit := tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "⏳ Файл скачан. Идет парсинг сообщений...")
 	if _, err := b.api.Send(edit); err != nil {
@@ -497,7 +519,7 @@ func (b *Bot) summaryWorker(ctx context.Context) {
 			if err != nil {
 				log.Printf("summary err: %v", err)
 				var errText string
-				if strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "UNAVAILABLE") {
+				if errors.Is(err, ai.ErrOverloaded) {
 					errText = "⚠️ Серверы ИИ сейчас перегружены. Попробуй повторить запрос через минуту."
 				} else {
 					errText = "❌ Ошибка генерации саммари. Попробуй чуть позже."

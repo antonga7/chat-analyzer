@@ -120,12 +120,12 @@ func ParseJSON(r io.Reader, chatID int64) ([]storage.Message, error) {
 		}
 
 		result = append(result, storage.Message{
-			ChatID:    chatID,
-			UserID:    userID,
-			Username:  username,
-			Text:      content,
-			MsgType:   msgType,
-			CreatedAt: createdAt,
+			ChatID:      chatID,
+			UserID:      userID,
+			Username:    username,
+			Text:        content,
+			MsgType:     msgType,
+			CreatedAt:   createdAt,
 			TgMessageID: msg.ID,
 		})
 
