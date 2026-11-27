@@ -151,14 +151,34 @@ func classifyMessage(msg *tgbotapi.Message) (msgType string, content string, ok 
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
-	// Если прислали .json файл – перехватываем его для импорта истории чата (не сохраняя сам файл в статистику)
+	// Запускаем импорт только для .json/.html с подписью /import (обычные файлы идут в статистику)
 	if msg.Document != nil {
 		filename := strings.ToLower(msg.Document.FileName)
-		if strings.HasSuffix(filename, ".json") || strings.HasSuffix(filename, ".html") {
+		caption := strings.ToLower(strings.TrimSpace(msg.Caption))
+		isImportFile := strings.HasSuffix(filename, ".json") || strings.HasSuffix(filename, ".html")
+		isImportCaption := caption == "/import" || strings.HasPrefix(caption, "/import@")
+
+		if isImportFile && isImportCaption {
+			if msg.Chat.IsGroup() || msg.Chat.IsSuperGroup() {
+				isAdmin, err := b.isChatAdmin(msg.Chat.ID, msg.From.ID)
+				if err != nil {
+					log.Printf("check admin status: %v", err)
+					if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Не удалось проверить права администратора.")); sendErr != nil {
+						log.Printf("send error: %v", sendErr)
+					}
+					return
+				}
+				if !isAdmin {
+					if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "⛔ Импортировать историю чата могут только администраторы.")); sendErr != nil {
+						log.Printf("send error: %v", sendErr)
+					}
+					return
+				}
+			}
+
 			b.handleFileImport(ctx, msg)
 			return
 		}
-
 	}
 
 	// Если это команда бота(/top, /me, /stats, /help, /summary, /start) - выполняем команду и не засоряем статистику
@@ -185,7 +205,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 				"2. Нажми «⋮» (три точки в правом верхнем углу) -> Экспорт истории чата.\n" +
 				"3. Сними ВСЕ галочки с фото/видео/файлов.\n" +
 				"4. Выбери формат: «Машиночитаемый JSON» (result.json) или HTML (messages.html).\n" +
-				"5. Отправь полученный файл прямо сюда в чат!"
+				"5. Отправь полученный файл сюда в чат с подписью /import (в группах — только от администратора)!"
 			reply := tgbotapi.NewMessage(msg.Chat.ID, importText)
 			if _, err := b.api.Send(reply); err != nil {
 				log.Printf("sending import help: %v", err)
@@ -343,6 +363,19 @@ func (b *Bot) handleStatsCommand(ctx context.Context, msg *tgbotapi.Message) {
 
 }
 
+func (b *Bot) isChatAdmin(chatID, userID int64) (bool, error) {
+	member, err := b.api.GetChatMember(tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+			ChatID: chatID,
+			UserID: userID,
+		},
+	})
+	if err != nil {
+		return false, fmt.Errorf("get chat member: %w", err)
+	}
+	return member.IsAdministrator() || member.IsCreator(), nil
+}
+
 func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 	filename := strings.ToLower(msg.Document.FileName)
 
@@ -410,12 +443,18 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Обработка ошибок парсинга
 	if parseErr != nil {
-		errText := fmt.Sprintf("❌ Ошибка при чтении файла экспорта: %v", parseErr)
+		var errText string
+		if errors.Is(parseErr, importer.ErrChatIDMismatch) {
+			errText = "⛔ Этот файл экспорта принадлежит другому чату. В группу можно загружать только её собственную историю."
+		} else {
+			errText = fmt.Sprintf("❌ Ошибка при чтении файла экспорта: %v", parseErr)
+		}
 		if _, err := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, errText)); err != nil {
 			log.Printf("send error: %v", err)
 		}
 		return
 	}
+
 	if len(msgs) == 0 {
 		if _, err := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "В файле не найдено сообщений.")); err != nil {
 			log.Printf("send error: %v", err)

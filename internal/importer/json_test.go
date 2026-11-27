@@ -3,6 +3,7 @@ package importer
 import (
 	"chat-analyzer/internal/storage"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +204,45 @@ func TestParseJSON(t *testing.T) {
 			}
 			if !msg.CreatedAt.Equal(time.Unix(1700000000, 0)) {
 				t.Errorf("CreatedAt = %v, want %v", msg.CreatedAt, time.Unix(1700000000, 0))
+			}
+		})
+	}
+}
+
+func TestParseJSON_ChatIDValidation(t *testing.T) {
+	const sampleJSON = `{
+		"id": 123456789,
+		"messages": [
+			{
+				"id": 1,
+				"type": "message",
+				"date_unixtime": "1730635200",
+				"from": "Anton",
+				"from_id": "user42",
+				"text": "Привет"
+			}
+		]
+	}`
+
+	tests := []struct {
+		name    string
+		chatID  int64
+		wantErr error
+	}{
+		{name: "matching supergroup", chatID: -100123456789, wantErr: nil},
+		{name: "matching basic group", chatID: -123456789, wantErr: nil},
+		{name: "different group rejected", chatID: -100999999999, wantErr: ErrChatIDMismatch},
+		{name: "private chat allowed for testing", chatID: 555555, wantErr: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs, err := ParseJSON(strings.NewReader(sampleJSON), tt.chatID)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ParseJSON() err = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr == nil && len(msgs) != 1 {
+				t.Fatalf("len(msgs) = %d, want 1", len(msgs))
 			}
 		})
 	}

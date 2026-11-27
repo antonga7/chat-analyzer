@@ -3,6 +3,7 @@ package importer
 import (
 	"chat-analyzer/internal/storage"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -10,9 +11,25 @@ import (
 	"time"
 )
 
+var ErrChatIDMismatch = errors.New("export chat_id does not match target chat")
+
 // exportData описывает корень файла result.json
 type exportData struct {
+	ID       int64             `json:"id"`
 	Messages []telegramMessage `json:"messages"`
+}
+
+func matchesChatID(exportID, chatID int64) bool {
+	// В личке с ботом (chatID > 0) разрешаем любой файл для тестов,
+	// а если в JSON не указано поле id (0) — пропускаем проверку.
+	if exportID == 0 || chatID > 0 || exportID == chatID {
+		return true
+	}
+
+	botIDStr := strconv.FormatInt(chatID, 10)
+	exportIDStr := strconv.FormatInt(exportID, 10)
+
+	return botIDStr == "-"+exportIDStr || botIDStr == "-100"+exportIDStr
 }
 
 // rawMessage описывает одно сообщение внутри JSON
@@ -90,6 +107,9 @@ func ParseJSON(r io.Reader, chatID int64) ([]storage.Message, error) {
 	var data exportData
 	if err := json.NewDecoder(r).Decode(&data); err != nil {
 		return nil, fmt.Errorf("decode json: %w", err)
+	}
+	if !matchesChatID(data.ID, chatID) {
+		return nil, fmt.Errorf("%w: export id %d, target chat %d", ErrChatIDMismatch, data.ID, chatID)
 	}
 	result := make([]storage.Message, 0, len(data.Messages))
 	for _, msg := range data.Messages {
