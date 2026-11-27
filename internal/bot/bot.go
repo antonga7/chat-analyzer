@@ -379,23 +379,36 @@ func (b *Bot) isChatAdmin(chatID, userID int64) (bool, error) {
 func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 	filename := strings.ToLower(msg.Document.FileName)
 
-	// 1. Отправляем сообщение - статус
-	statusMsg := tgbotapi.NewMessage(msg.Chat.ID, "⏳ Начинаю скачивание файла от серверов Telegram...")
-	sentStatus, _ := b.api.Send(statusMsg)
-
-	// 2. Запрашиваем у Telegram прямую ссылка на скачивание файла по его FileId
-	fileURL, err := b.api.GetFileDirectURL(msg.Document.FileID)
-	if err != nil {
-		if _, err := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка получения ссылки на файл.")); err != nil {
-			log.Printf("get file direct url: %v", err)
+	// 1. Проверяем лимит размера файла до отправки статуса (экономим запрос к API)
+	const maxTelegramFileSize = 20 * 1024 * 1024 // 20 МБ — лимит Telegram Bot API
+	if msg.Document.FileSize > maxTelegramFileSize {
+		sizeMB := float64(msg.Document.FileSize) / (1024 * 1024)
+		errText := fmt.Sprintf("❌ Файл слишком большой (%.1f МБ). Лимит Telegram для ботов — 20 МБ.\nЭкспортируй историю частями по диапазону дат.", sizeMB)
+		if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, errText)); sendErr != nil {
+			log.Printf("send file too big error: %v", sendErr)
 		}
 		return
 	}
 
-	// 3. Скачиваем файл в оперативную память
+	// 2. Отправляем сообщение-статус
+	statusMsg := tgbotapi.NewMessage(msg.Chat.ID, "⏳ Начинаю скачивание файла от серверов Telegram...")
+	sentStatus, _ := b.api.Send(statusMsg)
+
+	// 3. Запрашиваем у Telegram прямую ссылку на скачивание файла по его FileID
+	fileURL, err := b.api.GetFileDirectURL(msg.Document.FileID)
+	if err != nil {
+		log.Printf("get file direct url: %v", err)
+		if _, sendErr := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "❌ Ошибка получения ссылки на файл.")); sendErr != nil {
+			log.Printf("send error: %v", sendErr)
+		}
+		return
+	}
+
+	// 4. Скачиваем файл потоково
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
-		if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка скачивания файла.")); sendErr != nil {
+		log.Printf("create download request: %v", err)
+		if _, sendErr := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "❌ Ошибка подготовки загрузки файла.")); sendErr != nil {
 			log.Printf("send error: %v", sendErr)
 		}
 		return
@@ -404,7 +417,8 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 	client := &http.Client{Timeout: 2 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		if _, sendErr := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка скачивания файла (таймаут или обрыв сети).")); sendErr != nil {
+		log.Printf("download file: %v", err)
+		if _, sendErr := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, "❌ Ошибка скачивания файла (таймаут или обрыв сети).")); sendErr != nil {
 			log.Printf("send error: %v", sendErr)
 		}
 		return
@@ -462,7 +476,7 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// Обновляем стату
+	// Обновляем статус
 	edit = tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, fmt.Sprintf("⏳ Найдено %d сообщений. Сохраняю в базу данных (это займет пару секунд)...", len(msgs)))
 	if _, err := b.api.Send(edit); err != nil {
 		log.Printf("send error: %v", err)
@@ -481,7 +495,6 @@ func (b *Bot) handleFileImport(ctx context.Context, msg *tgbotapi.Message) {
 	if _, err := b.api.Send(tgbotapi.NewEditMessageText(msg.Chat.ID, sentStatus.MessageID, successText)); err != nil {
 		log.Printf("send error: %v", err)
 	}
-
 }
 
 func (b *Bot) handleSummaryCommand(ctx context.Context, msg *tgbotapi.Message, style ai.SummaryStyle) {
