@@ -150,6 +150,17 @@ func classifyMessage(msg *tgbotapi.Message) (msgType string, content string, ok 
 
 }
 
+func formatDisplayName(u *tgbotapi.User) string {
+	fullName := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	if fullName != "" {
+		return fullName
+	}
+	if u.UserName != "" {
+		return u.UserName
+	}
+	return "Unknown"
+}
+
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Запускаем импорт только для .json/.html с подписью /import (обычные файлы идут в статистику)
 	if msg.Document != nil {
@@ -229,10 +240,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	username := msg.From.UserName
-	if username == "" {
-		username = msg.From.FirstName // Если у юзера нет @ ника, берем его имая
-	}
+	username := formatDisplayName(msg.From)
 
 	dbMsg := storage.Message{
 		ChatID:      msg.Chat.ID,
@@ -292,10 +300,7 @@ func (b *Bot) handleMeCommand(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	name := msg.From.UserName
-	if name == "" {
-		name = msg.From.FirstName
-	}
+	name := formatDisplayName(msg.From)
 
 	text := fmt.Sprintf(
 		"👤 Статистика для %s:\n\n"+

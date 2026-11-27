@@ -66,6 +66,7 @@ func (s *Storage) InitSchema(ctx context.Context) error {
 	ALTER TABLE messages ADD COLUMN IF NOT EXISTS tg_message_id BIGINT;
 	CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_tg_id ON messages (chat_id, tg_message_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_chat_user_created ON messages (chat_id, user_id, created_at DESC, id DESC);
 	`
 
 	_, err := s.pool.Exec(ctx, query)
@@ -108,17 +109,34 @@ type UserStat struct {
 
 func (s *Storage) GetTopUsers(ctx context.Context, chatID int64, limit int) ([]UserStat, error) {
 	query := `
-	SELECT 
-	    Max(username) as username, 
-	    COUNT(*) as total_count,
-		COUNT(*) FILTER(WHERE msg_type = 'text') as text_count,
-		COUNT(*) FILTER(WHERE msg_type = 'forward') as forward_count,
-		COUNT(*) FILTER(WHERE msg_type IN ('photo', 'document', 'media')) as media_count
-	FROM messages
-	WHERE chat_id = $1
-	GROUP BY user_id
-	ORDER BY total_count DESC
-	LIMIT $2;`
+	WITH top_users AS (
+		SELECT
+			user_id,
+			COUNT(*) AS total_count,
+			COUNT(*) FILTER (WHERE msg_type = 'text') AS text_count,
+			COUNT(*) FILTER (WHERE msg_type = 'forward') AS forward_count,
+			COUNT(*) FILTER (WHERE msg_type IN ('photo', 'document', 'media')) AS media_count
+		FROM messages
+		WHERE chat_id = $1
+		GROUP BY user_id
+		ORDER BY total_count DESC
+		LIMIT $2
+	)
+	SELECT
+		latest.username,
+		t.total_count,
+		t.text_count,
+		t.forward_count,
+		t.media_count
+	FROM top_users t
+	JOIN LATERAL (
+		SELECT m.username
+		FROM messages m
+		WHERE m.chat_id = $1 AND m.user_id = t.user_id
+		ORDER BY m.created_at DESC, m.id DESC
+		LIMIT 1
+	) latest ON true
+	ORDER BY t.total_count DESC;`
 
 	rows, err := s.pool.Query(ctx, query, chatID, limit)
 	if err != nil {
@@ -271,15 +289,35 @@ func (s *Storage) SaveMessagesBatch(ctx context.Context, msgs []Message) (int64,
 
 func (s *Storage) GetRecentMessages(ctx context.Context, chatID int64, limit int) ([]Message, error) {
 	query := `
-	SELECT username, text, created_at
-	FROM (
-	  		SELECT username, text, created_at
-	  		FROM messages
-	  		where chat_id = $1 AND msg_type = 'text' AND text != ''
-			ORDER BY created_at DESC
-			LIMIT $2
-	) sub
-	ORDER BY created_at ASC;`
+	WITH recent AS (
+		SELECT
+			id,
+			user_id,
+			text,
+			created_at
+		FROM messages
+		WHERE chat_id = $1 AND msg_type = 'text' AND text != ''
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2
+	),
+	latest_names AS (
+		SELECT u.user_id, latest.username
+		FROM (SELECT DISTINCT user_id FROM recent) u
+		JOIN LATERAL (
+			SELECT m.username
+			FROM messages m
+			WHERE m.chat_id = $1 AND m.user_id = u.user_id
+			ORDER BY m.created_at DESC, m.id DESC
+			LIMIT 1
+		) latest ON true
+	)
+	SELECT
+		ln.username,
+		r.text,
+		r.created_at
+	FROM recent r
+	JOIN latest_names ln ON ln.user_id = r.user_id
+	ORDER BY r.created_at ASC, r.id ASC;`
 
 	rows, err := s.pool.Query(ctx, query, chatID, limit)
 	if err != nil {
